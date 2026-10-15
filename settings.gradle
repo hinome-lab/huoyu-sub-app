@@ -1,0 +1,17 @@
+// 说明：maven.google.com 在部分网络下不可达，统一走 dl.google.com 直连镜像
+pluginManagement {
+    repositories {
+        maven { url 'https://dl.google.com/dl/android/maven2/' }
+        maven { url 'https://repo1.maven.org/maven2/' }
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        maven { url 'https://dl.google.com/dl/android/maven2/' }
+        maven { url 'https://repo1.maven.org/maven2/' }
+    }
+}
+
+rootProject.name = "huoyu-sub-app"
+include ':app'

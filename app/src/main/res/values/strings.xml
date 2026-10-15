@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">火羽实时字幕</string>
+    <string name="channel_name">悬浮字幕</string>
+    <string name="channel_desc">在其它应用上层显示直播实时翻译字幕</string>
+</resources>
