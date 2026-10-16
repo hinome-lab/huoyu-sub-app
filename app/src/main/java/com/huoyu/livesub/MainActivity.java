@@ -133,7 +133,7 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         String ua = s.getUserAgentString();
-        s.setUserAgentString(ua + " HuoYuSub/1.2");
+        s.setUserAgentString(ua + " HuoYuSub/1.3");
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -229,7 +229,13 @@ public class MainActivity extends Activity {
     }
 
     private void startOverlay() {
-        Intent i = new Intent(this, OverlayService.class);
+        // 每次开启都把悬浮字幕窗口位置重置回初始位置
+        sp.edit()
+                .putInt(Prefs.KEY_X, -1)
+                .putInt(Prefs.KEY_Y, -1)
+                .apply();
+
+        Intent i = new Intent(this, OverlayService.class).setAction(OverlayService.ACTION_START);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i);
             else startService(i);

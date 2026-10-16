@@ -42,6 +42,10 @@ import java.util.List;
 public class OverlayService extends Service {
 
     public static final String ACTION_STOP   = "com.huoyu.livesub.action.STOP";
+    /** 开启悬浮字幕：把悬浮窗位置重置回初始位置 */
+    public static final String ACTION_START  = "com.huoyu.livesub.action.START";
+    /** 仅重置悬浮窗位置到初始位置（不重启服务） */
+    public static final String ACTION_RESET_POS = "com.huoyu.livesub.action.RESET_POS";
     public static final String ACTION_LOCK   = "com.huoyu.livesub.action.LOCK";
     public static final String ACTION_JA     = "com.huoyu.livesub.action.JA";
     public static final String ACTION_RESIZE = "com.huoyu.livesub.action.RESIZE";
@@ -130,6 +134,11 @@ public class OverlayService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (ACTION_START.equals(a) || ACTION_RESET_POS.equals(a)) {
+            // 开启悬浮字幕时，位置重置回初始位置
+            resetPosition();
+            return START_STICKY;
+        }
         if (ACTION_LOCK.equals(a)) {
             setLocked(!locked);
             return START_STICKY;
@@ -216,6 +225,39 @@ public class OverlayService extends Service {
                 .apply();
     }
 
+    /** 初始位置：左边距 12dp */
+    private int defaultX() {
+        return dp(12);
+    }
+
+    /** 初始位置：屏幕高度的 60% 处 */
+    private int defaultY() {
+        return (int) (screenH() * 0.60);
+    }
+
+    /**
+     * 把悬浮窗位置重置回初始位置，并清掉记住的坐标，
+     * 这样下次重启服务（熄屏被杀后恢复等）也从初始位置开始。
+     */
+    private void resetPosition() {
+        px = -1;
+        py = -1;
+        sp.edit()
+                .putInt(Prefs.KEY_X, -1)
+                .putInt(Prefs.KEY_Y, -1)
+                .apply();
+
+        if (lp == null || wm == null || card == null) return;
+        lp.x = defaultX();
+        lp.y = defaultY();
+        px = lp.x;
+        py = lp.y;
+        try {
+            wm.updateViewLayout(card, lp);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void applyConfig() {
         if (card == null) return;
         GradientDrawable bg = new GradientDrawable();
@@ -297,10 +339,8 @@ public class OverlayService extends Service {
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
 
-        int defX = dp(12);
-        int defY = (int) (screenH() * 0.60);
-        lp.x = px < 0 ? defX : px;
-        lp.y = py < 0 ? defY : py;
+        lp.x = px < 0 ? defaultX() : px;
+        lp.y = py < 0 ? defaultY() : py;
         px = lp.x;
         py = lp.y;
 

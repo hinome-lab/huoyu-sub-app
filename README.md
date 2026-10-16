@@ -10,7 +10,7 @@
 ![minSdk](https://img.shields.io/badge/minSdk-24-3DDC84?logo=android&logoColor=white)
 ![targetSdk](https://img.shields.io/badge/targetSdk-34-3DDC84?logo=android&logoColor=white)
 ![Java](https://img.shields.io/badge/Java-17-orange?logo=openjdk&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.2-blue)
+![Version](https://img.shields.io/badge/version-1.3-blue)
 ![Dependencies](https://img.shields.io/badge/third--party%20deps-0-brightgreen)
 
 </div>
@@ -88,6 +88,7 @@
 | 点「锁定」 | 字幕不再吃触摸，可放心操作下面被遮住的界面 |
 | 拉下通知栏点「解锁」 | 恢复可拖动 / 可调字号 |
 | 通知栏「仅中文」 | 快速切换中日对照 / 仅中文 |
+| 关闭后重新点「开启悬浮字幕」 | 悬浮窗位置**复位到初始位置**（左侧 12dp、屏幕高度 60% 处） |
 | 设置 → 改「字幕服务器地址」「密钥 k」 | 复用同一 App 连接其它直播间 / 服务器 |
 
 **收不到字幕？** 拉下通知栏看状态文字：
@@ -284,6 +285,7 @@ gradle assembleRelease
 
 | 版本 | versionCode | 日期 | 内容 |
 |---|---|---|---|
+| **v1.3** | 4 | 2026-10-16 | 修复：点「开启悬浮字幕」时把悬浮窗位置**重置回初始位置**（左侧 12dp、屏幕高度 60% 处） |
 | **v1.2** | 3 | 2026-10-16 | 启动时检测新版本（`/api/version`），非最新弹窗提醒升级；新增「立即检查更新」入口；设置页显示当前版本 |
 | **v1.1** | 2 | 2026-10-16 | 网址变化时自动切换字幕服务器（白名单匹配 + 同步 `k` + 无缝重连） |
 | **v1.0** | 1 | 2026-10-15 | 首个版本：WebView 网页壳 + 悬浮字幕（中日对照 / 拖动 / 字号 / 行数 / 透明度 / 锁定穿透 / 通知栏控制 / 断线自愈） |
