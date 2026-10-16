@@ -92,6 +92,8 @@ public class OverlayService extends Service {
     private boolean locked = false;
     private int px = -1, py = -1;
     private int maxWidthPx = 900;
+    /** 上一次已知的屏幕尺寸，用于横竖屏切换时按比例换算位置 */
+    private int lastScreenW = 0, lastScreenH = 0;
 
     static class Line {
         long id;
@@ -195,8 +197,86 @@ public class OverlayService extends Service {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         // 旋转后重新限制宽度，避免字幕超出屏幕
-        maxWidthPx = (int) (screenW() * 0.92) - dp(24);
+        int newW = (int) screenW();
+        int newH = (int) screenH();
+        maxWidthPx = (int) (newW * 0.92) - dp(24);
         applyConfig();
+        // 按比例把窗口位置映射到新的屏幕尺寸，并约束回屏幕内，避免转到屏幕外
+        repositionForScreen(lastScreenW, lastScreenH, newW, newH);
+        lastScreenW = newW;
+        lastScreenH = newH;
+    }
+
+    // ================= 位置换算 / 边界约束 =================
+
+    /** 把 x 约束到 [0, 屏宽-窗宽] */
+    private int clampX(int x, int winW, int screenW) {
+        int max = Math.max(0, screenW - winW);
+        return Math.max(0, Math.min(max, x));
+    }
+
+    /** 把 y 约束到 [0, 屏高-窗高] */
+    private int clampY(int y, int winH, int screenH) {
+        int max = Math.max(0, screenH - winH);
+        return Math.max(0, Math.min(max, y));
+    }
+
+    /**
+     * 横竖屏切换后重新定位：
+     * 以窗口中心为基准，把相对位置按屏幕尺寸等比换算，再整体约束进屏幕，
+     * 这样窗口既保持原来的相对位置（视觉上仍在屏幕中间区域），又绝不会跑到屏幕外。
+     */
+    private void repositionForScreen(int oldW, int oldH, int newW, int newH) {
+        if (lp == null || wm == null || card == null) return;
+
+        int cw = card.getWidth();
+        int chh = card.getHeight();
+        if (cw <= 0) cw = Math.max(dp(120), maxWidthPx / 2);   // 尚未测量时的兜底
+        if (chh <= 0) chh = dp(64);
+
+        int nx = lp.x, ny = lp.y;
+        if (oldW > 0 && oldH > 0 && (oldW != newW || oldH != newH)) {
+            float cx = (lp.x + cw / 2f) / oldW * newW;
+            float cy = (lp.y + chh / 2f) / oldH * newH;
+            nx = Math.round(cx - cw / 2f);
+            ny = Math.round(cy - chh / 2f);
+        }
+
+        nx = clampX(nx, cw, newW);
+        ny = clampY(ny, chh, newH);
+
+        lp.x = nx;
+        lp.y = ny;
+        px = nx;
+        py = ny;
+        try {
+            wm.updateViewLayout(card, lp);
+        } catch (Throwable ignored) {
+        }
+        saveConfig();   // 记住换算后的位置，服务被重启时也落在屏幕内
+        // 方向切换会导致字幕重新折行、窗口尺寸变化，布局稳定后再兜底约束一次
+        if (card != null) card.post(this::clampIntoView);
+    }
+
+    /** 窗口尺寸已知后，把它整体约束回屏幕内（处理保存的位置来自另一方向的情况） */
+    private void clampIntoView() {
+        if (lp == null || wm == null || card == null) return;
+        int w = card.getWidth();
+        int hh = card.getHeight();
+        if (w <= 0 || hh <= 0) return;
+
+        int nx = clampX(lp.x, w, (int) screenW());
+        int ny = clampY(lp.y, hh, (int) screenH());
+        if (nx == lp.x && ny == lp.y) return;
+
+        lp.x = nx;
+        lp.y = ny;
+        px = nx;
+        py = ny;
+        try {
+            wm.updateViewLayout(card, lp);
+        } catch (Throwable ignored) {
+        }
     }
 
     // ================= 配置 =================
@@ -345,6 +425,11 @@ public class OverlayService extends Service {
         py = lp.y;
 
         wm.addView(card, lp);
+
+        lastScreenW = (int) screenW();
+        lastScreenH = (int) screenH();
+        // 窗口尺寸测量完成后，把位置约束回屏幕内（防止保存的位置来自另一方向）
+        card.post(this::clampIntoView);
 
         GradientDrawable bgo = new GradientDrawable();
         bgo.setColor(Color.argb(Math.max(0, Math.min(255, bgAlpha)), 0, 0, 0));
