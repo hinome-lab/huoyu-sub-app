@@ -14,6 +14,7 @@ import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.Icon;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -45,6 +46,10 @@ public class OverlayService extends Service {
     public static final String ACTION_JA     = "com.huoyu.livesub.action.JA";
     public static final String ACTION_RESIZE = "com.huoyu.livesub.action.RESIZE";
     public static final String ACTION_APPLY  = "com.huoyu.livesub.action.APPLY";
+    /** 运行时切换字幕服务器地址（网页地址变化触发） */
+    public static final String ACTION_SWITCH = "com.huoyu.livesub.action.SWITCH";
+    public static final String EXTRA_BASE    = "extra_base";
+    public static final String EXTRA_TOKEN   = "extra_token";
 
     /** 供界面查询状态 */
     public static volatile boolean RUNNING = false;
@@ -145,6 +150,10 @@ public class OverlayService extends Service {
             loadConfig();
             applyConfig();
             restartSse();
+            return START_STICKY;
+        }
+        if (ACTION_SWITCH.equals(a)) {
+            switchServer(intent.getStringExtra(EXTRA_BASE), intent.getStringExtra(EXTRA_TOKEN));
             return START_STICKY;
         }
         return START_STICKY;
@@ -538,6 +547,46 @@ public class OverlayService extends Service {
 
     private void restartSse() {
         startSse();
+    }
+
+    /**
+     * 运行时切换字幕服务器（网页地址跳到别的白名单服务器时由 MainActivity 触发）。
+     * 若地址真的变了：清掉旧服务器的字幕缓存、持久化新地址、状态栏提示并立刻重连。
+     */
+    private void switchServer(String newBase, String newToken) {
+        if (newBase == null || newBase.trim().isEmpty()) return;
+        String nb = Prefs.normalize(newBase);
+        String nt = (newToken == null || newToken.trim().isEmpty()) ? token : newToken.trim();
+
+        if (nb.equals(Prefs.normalize(base)) && nt.equals(token)) return;   // 没变化
+
+        base = nb;
+        token = nt;
+        sp.edit()
+                .putString(Prefs.KEY_BASE, base)
+                .putString(Prefs.KEY_TOKEN, token)
+                .apply();
+
+        buf.clear();                       // 旧服务器的字幕不再沿用
+        STATE = "已切换服务器 · " + hostPort(base);
+        render();
+        updateNoti();
+        try {
+            Toast.makeText(this, "字幕服务器已自动切换：" + hostPort(base), Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) {
+        }
+        restartSse();
+    }
+
+    /** http://host:port/ -> host:port */
+    private String hostPort(String b) {
+        try {
+            Uri u = Uri.parse(b);
+            String host = u.getHost();
+            return u.getPort() > 0 ? (host + ":" + u.getPort()) : String.valueOf(host);
+        } catch (Throwable t) {
+            return b;
+        }
     }
 
     private void handleEvent(JSONObject d) {

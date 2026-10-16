@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -127,12 +128,29 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 Uri u = req.getUrl();
                 String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
-                if (scheme.startsWith("http")) return false;      // http/https 全部留在应用内
+                if (scheme.startsWith("http")) {
+                    // http(s) 全部留在应用内，同时兜底检测一次地址变化
+                    watchUrl(u.toString());
+                    return false;
+                }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, u));
                 } catch (Throwable ignored) {
                 }
                 return true;
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                watchUrl(url);
+            }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                // 单页应用用 history.pushState 换地址时也会走到这里
+                watchUrl(url);
             }
 
             @Override
@@ -300,6 +318,75 @@ public class MainActivity extends Activity {
         return b + "?k=" + Uri.encode(token());
     }
 
+    // ================= 网址变化 → 自动切换字幕服务器 =================
+
+    /**
+     * 网页地址发生变化时调用：
+     * 若新地址命中白名单（106.15.35.175:6006 / 123.60.104.22:6006 / 123.60.104.22:6007 / 8.133.231.186:6006）
+     * 且与当前字幕服务器不是同一个，就把字幕服务器地址自动切换过去，
+     * 并让正在运行的悬浮字幕服务立刻重新订阅新服务器。
+     */
+    private void watchUrl(String url) {
+        if (url == null || url.trim().isEmpty()) return;
+        if (!sp.getBoolean(Prefs.KEY_AUTO_SWITCH, true)) return;
+
+        String hit = Prefs.matchServer(url);
+        if (hit == null) return;                       // 不在白名单内，不动
+
+        String curOrigin = Prefs.originOf(base());
+        String newOrigin = Prefs.originOf(hit);
+        if (newOrigin == null || newOrigin.equals(curOrigin)) return;   // 已经是同一个，无需切换
+
+        String newToken = tokenOf(url);
+        if (newToken == null || newToken.isEmpty()) newToken = token();
+
+        SharedPreferences.Editor e = sp.edit();
+        e.putString(Prefs.KEY_BASE, hit);
+        e.putString(Prefs.KEY_TOKEN, newToken);
+        e.apply();
+
+        String shown = shortAddr(hit);
+        Toast.makeText(this, "网址已变化，字幕服务器自动切换到 " + shown, Toast.LENGTH_SHORT).show();
+        if (status != null) {
+            status.setText("已切换：" + shown);
+            status.setTextColor(0xFF7FE0A6);
+        }
+        notifyOverlaySwitch(hit, newToken);
+    }
+
+    /** 从页面地址里取 ?k= 的值（没带就返回 null） */
+    private String tokenOf(String url) {
+        try {
+            String k = Uri.parse(url).getQueryParameter("k");
+            return k == null ? null : k.trim();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 通知正在运行的悬浮字幕服务：换服务器并重连 */
+    private void notifyOverlaySwitch(String newBase, String newToken) {
+        if (!OverlayService.RUNNING) return;            // 没在跑就不用通知，下次启动自会读新配置
+        try {
+            startService(new Intent(this, OverlayService.class)
+                    .setAction(OverlayService.ACTION_SWITCH)
+                    .putExtra(OverlayService.EXTRA_BASE, newBase)
+                    .putExtra(OverlayService.EXTRA_TOKEN, newToken));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** http://host:port/ -> host:port，用于界面提示 */
+    private String shortAddr(String b) {
+        try {
+            Uri u = Uri.parse(b);
+            String h = u.getHost();
+            return u.getPort() > 0 ? (h + ":" + u.getPort()) : String.valueOf(h);
+        } catch (Throwable t) {
+            return b;
+        }
+    }
+
     private void showSettings() {
         ScrollView sv = new ScrollView(this);
         LinearLayout box = new LinearLayout(this);
@@ -324,6 +411,12 @@ public class MainActivity extends Activity {
         cbJa.setChecked(sp.getBoolean(Prefs.KEY_JA, true));
         box.addView(cbJa);
 
+        CheckBox cbAuto = new CheckBox(this);
+        cbAuto.setText("网址变化时自动切换字幕服务器");
+        cbAuto.setTextColor(0xFFEAEAEA);
+        cbAuto.setChecked(sp.getBoolean(Prefs.KEY_AUTO_SWITCH, true));
+        box.addView(cbAuto);
+
         TextView tip = new TextView(this);
         tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tip.setTextColor(0xFF8B8B95);
@@ -333,7 +426,10 @@ public class MainActivity extends Activity {
                 + "2. 之后切到任意应用（含全屏播放器）都能看到火羽的实时翻译字幕。\n"
                 + "3. 拖动字幕可移动；轻点一下出现控制条（字号 / 中日 / 行数 / 锁定 / 关闭）。\n"
                 + "4. 锁定后字幕区域点击穿透，不会误触；再点通知栏「解锁」恢复。\n"
-                + "5. 通知栏常驻按钮：锁定、仅中文、停止。");
+                + "5. 通知栏常驻按钮：锁定、仅中文、停止。\n"
+                + "6. 自动切换：网页地址跳到白名单服务器（106.15.35.175:6006 / "
+                + "123.60.104.22:6006 / 123.60.104.22:6007 / 8.133.231.186:6006）时，"
+                + "字幕服务器地址会自动跟着切过去，悬浮字幕立即重连。");
         box.addView(tip);
 
         new AlertDialog.Builder(this)
@@ -347,6 +443,7 @@ public class MainActivity extends Activity {
                     e.putInt(Prefs.KEY_LINES, clamp(intOf(eLines.getText().toString(), Prefs.DEF_LINES), 1, 4));
                     e.putInt(Prefs.KEY_ALPHA, clamp(intOf(eAlpha.getText().toString(), Prefs.DEF_ALPHA), 0, 255));
                     e.putBoolean(Prefs.KEY_JA, cbJa.isChecked());
+                    e.putBoolean(Prefs.KEY_AUTO_SWITCH, cbAuto.isChecked());
                     e.apply();
 
                     if (wv != null) wv.loadUrl(pageUrl());
