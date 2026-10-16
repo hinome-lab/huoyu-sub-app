@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -26,12 +27,15 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import android.net.http.SslError;
+
+import java.util.Locale;
 
 /**
  * App 主体：
@@ -44,10 +48,18 @@ public class MainActivity extends Activity {
     private static final int REQ_OVERLAY = 1001;
     private static final int REQ_NOTI = 1002;
 
+    /** 自动检查更新的最小间隔（回到前台时若距上次超过该间隔才再查一次） */
+    private static final long AUTO_CHECK_INTERVAL = 10 * 60 * 1000L;
+
     private WebView wv;
     private TextView btnOverlay, btnReload, btnCfg, status;
     private SharedPreferences sp;
     private final Handler h = new Handler();
+
+    /** 升级弹窗是否正在显示（避免重复弹栈） */
+    private boolean updateDialogShowing = false;
+    /** 上次自动检查更新的时间戳 */
+    private long lastAutoCheckAt = 0L;
 
     private final Runnable ticker = new Runnable() {
         @Override
@@ -121,7 +133,7 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         String ua = s.getUserAgentString();
-        s.setUserAgentString(ua + " HuoYuSub/1.0");
+        s.setUserAgentString(ua + " HuoYuSub/1.2");
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -187,6 +199,7 @@ public class MainActivity extends Activity {
             }
         }
         refreshOverlayBtn();
+        checkUpdate(false);      // 每次打开 App 检测一次新版本
     }
 
     // ================= 悬浮字幕开关 =================
@@ -267,6 +280,20 @@ public class MainActivity extends Activity {
         if (wv != null) wv.onResume();
         h.removeCallbacks(ticker);
         h.post(ticker);
+        // 从后台回到前台也顺带查一次（限流，避免频繁打扰）
+        if (System.currentTimeMillis() - lastAutoCheckAt > AUTO_CHECK_INTERVAL) {
+            checkUpdate(false);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // launchMode=singleTask：再次点图标回到本界面时走这里，同样视为「打开 App」
+        if (System.currentTimeMillis() - lastAutoCheckAt > AUTO_CHECK_INTERVAL) {
+            checkUpdate(false);
+        }
     }
 
     @Override
@@ -387,6 +414,146 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ================= 版本检测 / 升级提醒 =================
+
+    /**
+     * 检测是否有新版本。
+     *
+     * @param manual true=用户手动点「检查更新」（失败与「已是最新」都会给出提示）；
+     *               false=打开 App 时自动检测（失败静默，只有确实有新版本才弹窗）
+     */
+    private void checkUpdate(final boolean manual) {
+        if (!manual) lastAutoCheckAt = System.currentTimeMillis();
+        UpdateChecker.check(base(), token(), new UpdateChecker.Callback() {
+            @Override
+            public void onSuccess(final UpdateChecker.Info info) {
+                runOnUiThread(() -> handleUpdateInfo(info, manual));
+            }
+
+            @Override
+            public void onFailure(final String msg) {
+                runOnUiThread(() -> {
+                    if (manual) {
+                        Toast.makeText(MainActivity.this, "检查更新失败：" + msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
+    }
+
+    private void handleUpdateInfo(UpdateChecker.Info info, boolean manual) {
+        if (isFinishing() || info == null) return;
+        int cur = installedVersionCode();
+        if (info.versionCode <= cur) {
+            if (manual) {
+                Toast.makeText(this, "当前已是最新版本 " + installedVersionName(), Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        showUpdateDialog(info, cur);
+    }
+
+    /** 弹升级提醒：可点「立即升级」打开下载页，或点「稍后更新」关闭 */
+    private void showUpdateDialog(final UpdateChecker.Info info, int cur) {
+        if (updateDialogShowing || isFinishing()) return;
+        updateDialogShowing = true;
+
+        final boolean force = info.force || (info.minVersionCode > 0 && cur < info.minVersionCode);
+        final String ver = info.label();
+        final String title = (info.title == null || info.title.trim().isEmpty())
+                ? ("发现新版本 " + ver) : info.title.trim();
+
+        TextView tv = new TextView(this);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        tv.setLineSpacing(0f, 1.3f);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("当前版本：").append(installedVersionName()).append("（").append(cur).append("）\n");
+        sb.append("最新版本：").append(ver).append("（").append(info.versionCode).append("）\n");
+        if (info.sizeBytes > 0) {
+            sb.append("安装包大小：约 ").append(fmtSize(info.sizeBytes)).append("\n");
+        }
+        sb.append('\n');
+        sb.append(info.notes == null || info.notes.trim().isEmpty()
+                ? "建议升级到最新版本，获得更好的体验。" : info.notes.trim());
+        if (force) {
+            sb.append("\n\n当前版本已不再受支持，请升级后继续使用。");
+        }
+        tv.setText(sb.toString());
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(tv);
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(box);
+
+        // 升级地址：服务端未给就用 {当前字幕服务器}/app
+        final String url = (info.downloadUrl == null || info.downloadUrl.trim().isEmpty())
+                ? (Prefs.normalize(base()) + "app") : info.downloadUrl.trim();
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(sv)
+                .setPositiveButton("立即升级", (d, w) -> openDownload(url));
+
+        if (force) {
+            b.setCancelable(false);
+        } else {
+            b.setNegativeButton("稍后更新", null);       // 点一下即关闭
+        }
+
+        AlertDialog dlg = b.create();
+        dlg.setCanceledOnTouchOutside(!force);
+        dlg.setOnDismissListener(d -> updateDialogShowing = false);
+        dlg.show();
+    }
+
+    /** 用系统浏览器 / 下载器打开升级地址（默认 http://<当前服务器>/app） */
+    private void openDownload(String url) {
+        if (url == null || url.trim().isEmpty()) {
+            Toast.makeText(this, "下载地址为空", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url.trim()));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            Toast.makeText(this, "无法打开下载地址：" + url, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** 本机已安装的 versionCode */
+    @SuppressWarnings("deprecation")
+    private int installedVersionCode() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= 28) return (int) pi.getLongVersionCode();
+            return pi.versionCode;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** 本机已安装的 versionName */
+    @SuppressWarnings("deprecation")
+    private String installedVersionName() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return pi.versionName == null ? "" : pi.versionName;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private String fmtSize(long n) {
+        if (n < 1024) return n + " B";
+        if (n < 1048576) return String.format(Locale.US, "%.0f KB", n / 1024.0);
+        return String.format(Locale.US, "%.1f MB", n / 1048576.0);
+    }
+
     private void showSettings() {
         ScrollView sv = new ScrollView(this);
         LinearLayout box = new LinearLayout(this);
@@ -429,10 +596,19 @@ public class MainActivity extends Activity {
                 + "5. 通知栏常驻按钮：锁定、仅中文、停止。\n"
                 + "6. 自动切换：网页地址跳到白名单服务器（106.15.35.175:6006 / "
                 + "123.60.104.22:6006 / 123.60.104.22:6007 / 8.133.231.186:6006）时，"
-                + "字幕服务器地址会自动跟着切过去，悬浮字幕立即重连。");
+                + "字幕服务器地址会自动跟着切过去，悬浮字幕立即重连。\n"
+                + "7. 版本检测：每次打开 App 会向当前服务器查询最新版本，"
+                + "有新版会弹窗提醒，点「立即升级」进入下载页。");
         box.addView(tip);
 
-        new AlertDialog.Builder(this)
+        TextView verInfo = new TextView(this);
+        verInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        verInfo.setTextColor(0xFF8B8B95);
+        verInfo.setPadding(0, dp(12), 0, 0);
+        verInfo.setText("当前版本：" + installedVersionName() + "（" + installedVersionCode() + "）");
+        box.addView(verInfo);
+
+        final AlertDialog settingsDlg = new AlertDialog.Builder(this)
                 .setTitle("设置")
                 .setView(sv)
                 .setPositiveButton("保存", (d, w) -> {
@@ -458,7 +634,21 @@ public class MainActivity extends Activity {
                     refreshOverlayBtn();
                 })
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+
+        Button btnCheck = new Button(this);
+        btnCheck.setText("立即检查更新");
+        btnCheck.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            checkUpdate(true);
+        });
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(12);
+        btnCheck.setLayoutParams(blp);
+        box.addView(btnCheck);
+
+        settingsDlg.show();
     }
 
     private EditText addField(LinearLayout box, String label, String value, int inputType) {
