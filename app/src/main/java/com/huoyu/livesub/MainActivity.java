@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -15,6 +16,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.provider.Settings;
 import android.text.InputType;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -37,6 +41,9 @@ import android.widget.Toast;
 
 import android.net.http.SslError;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.Locale;
 
 /**
@@ -50,6 +57,8 @@ public class MainActivity extends Activity {
     private static final int REQ_OVERLAY = 1001;
     private static final int REQ_NOTI = 1002;
     private static final int REQ_WRITE = 1003;
+    /** 选自定义字体文件（.ttf/.otf） */
+    private static final int REQ_FONT = 1004;
 
     /** 自动检查更新的最小间隔（回到前台时若距上次超过该间隔才再查一次） */
     private static final long AUTO_CHECK_INTERVAL = 10 * 60 * 1000L;
@@ -61,6 +70,9 @@ public class MainActivity extends Activity {
 
     /** 等存储权限期间暂存的导出格式（API < 29 才需要） */
     private int pendingSaveFmt = RecordExporter.FMT_TXT;
+
+    /** 等用户选完自定义字体文件后要回填的界面元素 */
+    private TextView pendingFontRow, pendingFontPreview;
 
     /** 升级弹窗是否正在显示（避免重复弹栈） */
     private boolean updateDialogShowing = false;
@@ -143,7 +155,7 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         String ua = s.getUserAgentString();
-        s.setUserAgentString(ua + " HuoYuSub/1.4");
+        s.setUserAgentString(ua + " HuoYuSub/1.5");
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -287,6 +299,27 @@ public class MainActivity extends Activity {
                 else Toast.makeText(this, "仍未获得悬浮窗权限", Toast.LENGTH_LONG).show();
                 refreshOverlayBtn();
             }, 400);
+        }
+        if (req == REQ_FONT) {
+            Uri u = (data == null) ? null : data.getData();
+            if (res == RESULT_OK && u != null) {
+                try {
+                    String path = importFont(u);
+                    sp.edit()
+                            .putString(Prefs.KEY_FONT, Prefs.FONT_CUSTOM)
+                            .putString(Prefs.KEY_FONT_PATH, path)
+                            .apply();
+                    if (pendingFontRow != null) pendingFontRow.setText(fontRowText());
+                    refreshStylePreview(pendingFontPreview);
+                    applyStyleNow();
+                    Toast.makeText(this, "已切换为自定义字体", Toast.LENGTH_SHORT).show();
+                } catch (Throwable t) {
+                    String m = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+                    Toast.makeText(this, "字体导入失败：" + m, Toast.LENGTH_LONG).show();
+                }
+            }
+            pendingFontRow = null;
+            pendingFontPreview = null;
         }
     }
 
@@ -743,6 +776,46 @@ public class MainActivity extends Activity {
         EditText eAlpha = addField(box, "背景不透明度 0-255",
                 String.valueOf(sp.getInt(Prefs.KEY_ALPHA, Prefs.DEF_ALPHA)), InputType.TYPE_CLASS_NUMBER);
 
+        // ===== 悬浮字幕样式（颜色 / 字体，改动立即生效）=====
+        addSection(box, "悬浮字幕样式 · 改动立即生效");
+
+        final TextView stylePreview = mkStylePreview();
+        box.addView(stylePreview);
+
+        final TextView rowZh = addActionRow(box, colorRowText("中文（翻译）颜色", fgColor()));
+        rowZh.setOnClickListener(v -> ColorPicker.show(this, "中文（翻译）颜色", fgColor(),
+                Prefs.DEF_FG_COLOR, c -> {
+                    sp.edit().putInt(Prefs.KEY_FG_COLOR, c).apply();
+                    rowZh.setText(colorRowText("中文（翻译）颜色", c));
+                    refreshStylePreview(stylePreview);
+                    applyStyleNow();
+                }));
+
+        final TextView rowJa = addActionRow(box, colorRowText("日文（原文）颜色", jaColor()));
+        rowJa.setOnClickListener(v -> ColorPicker.show(this, "日文（原文）颜色", jaColor(),
+                Prefs.DEF_JA_COLOR, c -> {
+                    sp.edit().putInt(Prefs.KEY_JA_COLOR, c).apply();
+                    rowJa.setText(colorRowText("日文（原文）颜色", c));
+                    refreshStylePreview(stylePreview);
+                    applyStyleNow();
+                }));
+
+        final TextView rowFont = addActionRow(box, fontRowText());
+        rowFont.setOnClickListener(v -> pickFont(rowFont, stylePreview));
+
+        final CheckBox cbBold = new CheckBox(this);
+        cbBold.setText("中文加粗（压在视频上更清楚）");
+        cbBold.setTextColor(0xFFEAEAEA);
+        cbBold.setChecked(sp.getBoolean(Prefs.KEY_BOLD, Prefs.DEF_BOLD));
+        cbBold.setOnCheckedChangeListener((b, checked) -> {
+            sp.edit().putBoolean(Prefs.KEY_BOLD, checked).apply();
+            refreshStylePreview(stylePreview);
+            applyStyleNow();
+        });
+        box.addView(cbBold);
+
+        refreshStylePreview(stylePreview);
+
         CheckBox cbJa = new CheckBox(this);
         cbJa.setText("显示日文原文对照");
         cbJa.setTextColor(0xFFEAEAEA);
@@ -771,7 +844,9 @@ public class MainActivity extends Activity {
                 + "7. 版本检测：每次打开 App 会向当前服务器查询最新版本，"
                 + "有新版会弹窗提醒，点「立即升级」进入下载页。\n"
                 + "8. 存字幕：点工具条「存字幕」可把本场全部字幕（中文翻译 + 日文原文）"
-                + "导出成 TXT / SRT / CSV / Markdown / JSON，文件存到「下载/火羽字幕」。");
+                + "导出成 TXT / SRT / CSV / Markdown / JSON，文件存到「下载/火羽字幕」。\n"
+                + "9. 样式：本页可改中文字幕颜色、日文字幕颜色、字体（7 种系统字体，"
+                + "也可导入手机里的 .ttf / .otf）和是否加粗，改完立即生效。");
         box.addView(tip);
 
         TextView verInfo = new TextView(this);
@@ -868,6 +943,219 @@ public class MainActivity extends Activity {
 
     private int clamp(int v, int lo, int hi) {
         return Math.max(lo, Math.min(hi, v));
+    }
+
+    // ================= 悬浮字幕样式（颜色 / 字体） =================
+
+    private int fgColor() {
+        return sp.getInt(Prefs.KEY_FG_COLOR, Prefs.DEF_FG_COLOR) | 0xFF000000;
+    }
+
+    private int jaColor() {
+        return sp.getInt(Prefs.KEY_JA_COLOR, Prefs.DEF_JA_COLOR) | 0xFF000000;
+    }
+
+    private String colorRowText(String label, int color) {
+        return label + "    " + String.format(Locale.US, "#%06X", color & 0xFFFFFF);
+    }
+
+    private String fontRowText() {
+        String fam = sp.getString(Prefs.KEY_FONT, Prefs.DEF_FONT);
+        String path = sp.getString(Prefs.KEY_FONT_PATH, "");
+        if (Prefs.FONT_CUSTOM.equals(fam) && !path.isEmpty()) {
+            return "字体    自定义：" + new File(path).getName();
+        }
+        return "字体    " + Prefs.FONT_LABELS[Prefs.fontIndex(fam)];
+    }
+
+    private void addSection(LinearLayout box, String title) {
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setTextColor(0xFF7FE0A6);
+        t.setPadding(0, dp(16), 0, dp(4));
+        box.addView(t);
+    }
+
+    private TextView addActionRow(LinearLayout box, String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        t.setTextColor(0xFFEAEAEA);
+        t.setPadding(dp(10), dp(9), dp(10), dp(9));
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0xFF26262E);
+        d.setCornerRadius(dp(7));
+        d.setStroke(dp(1), 0xFF3A3A44);
+        t.setBackground(d);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        t.setLayoutParams(lp);
+        box.addView(t);
+        return t;
+    }
+
+    private TextView mkStylePreview() {
+        TextView p = new TextView(this);
+        p.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0xFF101014);
+        d.setCornerRadius(dp(9));
+        d.setStroke(dp(1), 0xFF3A3A44);
+        p.setBackground(d);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        p.setLayoutParams(lp);
+        return p;
+    }
+
+    /** 预览块：中文用中文色、日文用日文色，字体/加粗同步当前配置 */
+    private void refreshStylePreview(TextView p) {
+        if (p == null) return;
+        try {
+            p.setTypeface(Prefs.currentTypeface(sp, sp.getBoolean(Prefs.KEY_BOLD, Prefs.DEF_BOLD)));
+            p.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            String s = "示例字幕 サンプル";
+            SpannableString ss = new SpannableString(s);
+            ss.setSpan(new ForegroundColorSpan(fgColor()), 0, 4, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ss.setSpan(new ForegroundColorSpan(jaColor()), 5, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            p.setText(ss);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 样式改动后让正在运行的悬浮字幕立刻重绘（不重连推送流） */
+    private void applyStyleNow() {
+        if (!OverlayService.RUNNING) return;
+        try {
+            startService(new Intent(this, OverlayService.class).setAction(OverlayService.ACTION_STYLE));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void pickFont(final TextView rowFont, final TextView preview) {
+        final int customIdx = Prefs.FONT_LABELS.length;
+        String path = sp.getString(Prefs.KEY_FONT_PATH, "");
+        String[] items = new String[customIdx + 1];
+        System.arraycopy(Prefs.FONT_LABELS, 0, items, 0, customIdx);
+        items[customIdx] = path.isEmpty()
+                ? "自定义字体文件（.ttf / .otf）…"
+                : ("自定义字体（" + new File(path).getName() + "）");
+
+        String fam = sp.getString(Prefs.KEY_FONT, Prefs.DEF_FONT);
+        int cur = Prefs.FONT_CUSTOM.equals(fam) ? customIdx : Prefs.fontIndex(fam);
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("悬浮字幕字体")
+                .setSingleChoiceItems(items, cur, (d, which) -> {
+                    d.dismiss();
+                    onFontChosen(which, rowFont, preview);
+                })
+                .setNegativeButton("取消", null);
+        if (!path.isEmpty()) {
+            b.setNeutralButton("移除自定义字体", (d, w) -> {
+                try {
+                    new File(path).delete();
+                } catch (Throwable ignored) {
+                }
+                sp.edit().putString(Prefs.KEY_FONT, Prefs.DEF_FONT)
+                        .putString(Prefs.KEY_FONT_PATH, "").apply();
+                rowFont.setText(fontRowText());
+                refreshStylePreview(preview);
+                applyStyleNow();
+                Toast.makeText(this, "已移除自定义字体", Toast.LENGTH_SHORT).show();
+            });
+        }
+        b.show();
+    }
+
+    private void onFontChosen(int which, TextView rowFont, TextView preview) {
+        int customIdx = Prefs.FONT_LABELS.length;
+        if (which == customIdx) {
+            String path = sp.getString(Prefs.KEY_FONT_PATH, "");
+            if (path.isEmpty() || !new File(path).exists()) {
+                pendingFontRow = rowFont;
+                pendingFontPreview = preview;
+                pickFontFile();
+                return;
+            }
+            sp.edit().putString(Prefs.KEY_FONT, Prefs.FONT_CUSTOM).apply();
+        } else {
+            sp.edit().putString(Prefs.KEY_FONT, Prefs.fontFamily(which)).apply();
+        }
+        rowFont.setText(fontRowText());
+        refreshStylePreview(preview);
+        applyStyleNow();
+    }
+
+    /** 打开系统文件选择器挑一个字体文件 */
+    private void pickFontFile() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_FONT);
+        } catch (Throwable t) {
+            Toast.makeText(this, "无法打开文件选择器：" + t.getMessage(), Toast.LENGTH_LONG).show();
+            pendingFontRow = null;
+            pendingFontPreview = null;
+        }
+    }
+
+    /** 把选中的字体文件拷进应用私有目录，并校验能否加载 */
+    private String importFont(Uri uri) throws Exception {
+        File dir = new File(getFilesDir(), "fonts");
+        if (!dir.exists() && !dir.mkdirs()) throw new Exception("无法创建字体目录");
+
+        File f = new File(dir, "custom_" + System.currentTimeMillis() + ".ttf");
+        InputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = getContentResolver().openInputStream(uri);
+            if (in == null) throw new Exception("无法读取所选文件");
+            out = new FileOutputStream(f);
+            byte[] b = new byte[8192];
+            int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            out.flush();
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        // 校验：加载不了就当不是字体文件
+        try {
+            Typeface tf = Typeface.createFromFile(f);
+            if (tf == null) throw new Exception("不是有效的字体文件");
+        } catch (Throwable t) {
+            try {
+                f.delete();
+            } catch (Throwable ignored) {
+            }
+            throw new Exception("不是有效的字体文件（只支持 .ttf / .otf）");
+        }
+
+        // 删掉上一个自定义字体，避免越攒越多
+        String old = sp.getString(Prefs.KEY_FONT_PATH, "");
+        if (!old.isEmpty() && !old.equals(f.getAbsolutePath())) {
+            try {
+                new File(old).delete();
+            } catch (Throwable ignored) {
+            }
+        }
+        return f.getAbsolutePath();
     }
 
     // ================= 小工具 =================

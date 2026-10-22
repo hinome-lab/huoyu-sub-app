@@ -1,5 +1,6 @@
 package com.huoyu.livesub;
 
+import android.graphics.Typeface;
 import android.net.Uri;
 
 import java.util.Locale;
@@ -30,6 +31,43 @@ public final class Prefs {
     public static final int DEF_LINES = 2;
     public static final int DEF_ALPHA = 175;
 
+    // ---- 悬浮字幕样式默认值 ----
+    /** 中文行默认颜色（纯白） */
+    public static final int DEF_FG_COLOR = 0xFFFFFFFF;
+    /** 日文行默认颜色（灰白，弱化处理） */
+    public static final int DEF_JA_COLOR = 0xFF9A9AA5;
+    /** 中文行默认加粗（压在视频上也清晰） */
+    public static final boolean DEF_BOLD = true;
+
+    /**
+     * 可选字体族（系统内置，无需打包字体文件）：
+     * 显示名 → Typeface 家族名。系统不认时自动回退到默认字体。
+     */
+    public static final String[] FONT_LABELS = {
+            "系统默认（黑体）",
+            "细体",
+            "中黑",
+            "特黑",
+            "宋体（衬线）",
+            "等宽",
+            "窄体",
+    };
+
+    public static final String[] FONT_FAMILIES = {
+            "sans-serif",
+            "sans-serif-light",
+            "sans-serif-medium",
+            "sans-serif-black",
+            "serif",
+            "monospace",
+            "sans-serif-condensed",
+    };
+
+    public static final String DEF_FONT = "sans-serif";
+
+    /** KEY_FONT 取该值表示「使用导入的自定义字体文件」 */
+    public static final String FONT_CUSTOM = "__custom__";
+
     public static final String KEY_BASE = "base";
     public static final String KEY_TOKEN = "token";
     public static final String KEY_FS = "fs";
@@ -43,8 +81,74 @@ public final class Prefs {
     public static final String KEY_AUTO_SWITCH = "auto_switch";
     /** 上次选择的字幕导出格式（RecordExporter.FMT_*） */
     public static final String KEY_SAVE_FMT = "save_fmt";
+    /** 悬浮字幕：中文行颜色（ARGB int） */
+    public static final String KEY_FG_COLOR = "fg_color";
+    /** 悬浮字幕：日文行颜色（ARGB int） */
+    public static final String KEY_JA_COLOR = "ja_color";
+    /** 悬浮字幕：字体家族名（见 FONT_FAMILIES），或 FONT_CUSTOM 表示自定义字体 */
+    public static final String KEY_FONT = "font";
+    /** 悬浮字幕：自定义字体文件路径（从手机导入后拷贝到应用私有目录） */
+    public static final String KEY_FONT_PATH = "font_path";
+    /** 悬浮字幕：中文行是否加粗 */
+    public static final String KEY_BOLD = "bold";
 
     private Prefs() {
+    }
+
+    // ================= 字体 =================
+
+    /** 字体家族名 → 可选列表下标（不认识的一律当 0） */
+    public static int fontIndex(String family) {
+        if (family != null) {
+            for (int i = 0; i < FONT_FAMILIES.length; i++) {
+                if (FONT_FAMILIES[i].equals(family)) return i;
+            }
+        }
+        return 0;
+    }
+
+    /** 下标 → 字体家族名（越界回退默认） */
+    public static String fontFamily(int index) {
+        if (index < 0 || index >= FONT_FAMILIES.length) return DEF_FONT;
+        return FONT_FAMILIES[index];
+    }
+
+    /** 取字体；家族名不被系统支持时回退到默认字体，绝不抛异常 */
+    public static Typeface typeface(String family, boolean bold) {
+        int style = bold ? Typeface.BOLD : Typeface.NORMAL;
+        try {
+            Typeface t = Typeface.create(family, style);
+            if (t != null) return t;
+        } catch (Throwable ignored) {
+        }
+        return bold ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT;
+    }
+
+    /**
+     * 取字体（含自定义字体文件）。
+     *
+     * @param family     字体家族名；等于 {@link #FONT_CUSTOM} 时用 customPath
+     * @param customPath 导入的 .ttf/.otf 绝对路径，可空
+     * @param bold       是否加粗（自定义字体走合成粗体）
+     */
+    public static Typeface typeface(String family, String customPath, boolean bold) {
+        int style = bold ? Typeface.BOLD : Typeface.NORMAL;
+        if (FONT_CUSTOM.equals(family) && customPath != null && !customPath.trim().isEmpty()) {
+            try {
+                Typeface base = Typeface.createFromFile(customPath.trim());
+                if (base != null) return Typeface.create(base, style);
+            } catch (Throwable ignored) {
+                // 文件损坏 / 不是字体 → 回退系统默认
+            }
+        }
+        return typeface(family, bold);
+    }
+
+    /** 读当前配置对应的字体 */
+    public static Typeface currentTypeface(android.content.SharedPreferences sp, boolean bold) {
+        String fam = sp.getString(KEY_FONT, DEF_FONT);
+        String path = sp.getString(KEY_FONT_PATH, "");
+        return typeface(fam, path, bold);
     }
 
     // ================= 地址工具 =================

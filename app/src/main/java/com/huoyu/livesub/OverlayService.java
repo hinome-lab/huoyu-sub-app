@@ -50,6 +50,8 @@ public class OverlayService extends Service {
     public static final String ACTION_JA     = "com.huoyu.livesub.action.JA";
     public static final String ACTION_RESIZE = "com.huoyu.livesub.action.RESIZE";
     public static final String ACTION_APPLY  = "com.huoyu.livesub.action.APPLY";
+    /** 只重载样式（颜色 / 字体 / 字号等）并重绘，不重连推送流 */
+    public static final String ACTION_STYLE  = "com.huoyu.livesub.action.STYLE";
     /** 运行时切换字幕服务器地址（网页地址变化触发） */
     public static final String ACTION_SWITCH = "com.huoyu.livesub.action.SWITCH";
     public static final String EXTRA_BASE    = "extra_base";
@@ -64,8 +66,6 @@ public class OverlayService extends Service {
     private static final int MAXSLOT = 4;
     private static final int MAXBUF = 8;
 
-    private static final int C_ZH = 0xFFFFFFFF;
-    private static final int C_JA = 0xFF9A9AA5;
     private static final int C_HINT = 0xFF8A8A96;
 
     private WindowManager wm;
@@ -90,6 +90,12 @@ public class OverlayService extends Service {
     private int bgAlpha = Prefs.DEF_ALPHA;
     private boolean showJa = true;
     private boolean locked = false;
+    // ---- 样式（颜色 / 字体）----
+    private int fgColor = Prefs.DEF_FG_COLOR;
+    private int jaColor = Prefs.DEF_JA_COLOR;
+    private String fontFamily = Prefs.DEF_FONT;
+    private String fontPath = "";
+    private boolean bold = Prefs.DEF_BOLD;
     private int px = -1, py = -1;
     private int maxWidthPx = 900;
     /** 上一次已知的屏幕尺寸，用于横竖屏切换时按比例换算位置 */
@@ -161,6 +167,12 @@ public class OverlayService extends Service {
             loadConfig();
             applyConfig();
             restartSse();
+            return START_STICKY;
+        }
+        if (ACTION_STYLE.equals(a)) {
+            // 只改样式：不重连、不清字幕，直接重绘
+            loadConfig();
+            applyConfig();
             return START_STICKY;
         }
         if (ACTION_SWITCH.equals(a)) {
@@ -289,6 +301,11 @@ public class OverlayService extends Service {
         bgAlpha = sp.getInt(Prefs.KEY_ALPHA, Prefs.DEF_ALPHA);
         showJa = sp.getBoolean(Prefs.KEY_JA, true);
         locked = sp.getBoolean(Prefs.KEY_LOCKED, false);
+        fgColor = sp.getInt(Prefs.KEY_FG_COLOR, Prefs.DEF_FG_COLOR) | 0xFF000000;
+        jaColor = sp.getInt(Prefs.KEY_JA_COLOR, Prefs.DEF_JA_COLOR) | 0xFF000000;
+        fontFamily = sp.getString(Prefs.KEY_FONT, Prefs.DEF_FONT);
+        fontPath = sp.getString(Prefs.KEY_FONT_PATH, "");
+        bold = sp.getBoolean(Prefs.KEY_BOLD, Prefs.DEF_BOLD);
         px = sp.getInt(Prefs.KEY_X, -1);
         py = sp.getInt(Prefs.KEY_Y, -1);
     }
@@ -346,9 +363,17 @@ public class OverlayService extends Service {
         card.setBackground(bg);
 
         int mw = Math.max(dp(80), maxWidthPx);
+        // 字体 / 颜色实时生效
+        Typeface tfZh = Prefs.typeface(fontFamily, fontPath, bold);
+        Typeface tfJa = Prefs.typeface(fontFamily, fontPath, false);
         for (int i = 0; i < MAXSLOT; i++) {
             zhs[i].setMaxWidth(mw);
             jas[i].setMaxWidth(mw);
+            try {
+                zhs[i].setTypeface(tfZh);
+                jas[i].setTypeface(tfJa);
+            } catch (Throwable ignored) {
+            }
         }
         if (lp != null) {
             lp.flags = baseFlags() | (locked ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0);
@@ -382,13 +407,13 @@ public class OverlayService extends Service {
             g.setOrientation(LinearLayout.VERTICAL);
 
             TextView z = new TextView(this);
-            z.setTextColor(C_ZH);
+            z.setTextColor(fgColor);
             z.setTypeface(Typeface.DEFAULT_BOLD);
             z.setShadowLayer(5f, 0f, 1f, Color.BLACK);
             z.setLineSpacing(0f, 1.12f);
 
             TextView j = new TextView(this);
-            j.setTextColor(C_JA);
+            j.setTextColor(jaColor);
             j.setShadowLayer(4f, 0f, 1f, Color.BLACK);
             j.setLineSpacing(0f, 1.12f);
 
@@ -437,9 +462,16 @@ public class OverlayService extends Service {
         card.setBackground(bgo);
 
         int mw = Math.max(dp(80), maxWidthPx);
+        Typeface tfZh = Prefs.typeface(fontFamily, fontPath, bold);
+        Typeface tfJa = Prefs.typeface(fontFamily, fontPath, false);
         for (int i = 0; i < MAXSLOT; i++) {
             zhs[i].setMaxWidth(mw);
             jas[i].setMaxWidth(mw);
+            try {
+                zhs[i].setTypeface(tfZh);
+                jas[i].setTypeface(tfJa);
+            } catch (Throwable ignored) {
+            }
         }
         refreshPanel();
     }
@@ -618,15 +650,15 @@ public class OverlayService extends Service {
             if (newest) {
                 z.setTextSize(TypedValue.COMPLEX_UNIT_SP, fs);
                 j.setTextSize(TypedValue.COMPLEX_UNIT_SP, Math.max(10f, fs * 0.64f));
-                z.setTextColor(C_ZH);
-                j.setTextColor(C_JA);
+                z.setTextColor(fgColor);
+                j.setTextColor(jaColor);
                 z.setAlpha(1f);
                 j.setAlpha(1f);
             } else {
                 z.setTextSize(TypedValue.COMPLEX_UNIT_SP, Math.max(10f, fs - 3f));
                 j.setTextSize(TypedValue.COMPLEX_UNIT_SP, Math.max(9f, fs * 0.58f));
-                z.setTextColor(C_ZH);
-                j.setTextColor(C_JA);
+                z.setTextColor(fgColor);
+                j.setTextColor(jaColor);
                 z.setAlpha(0.62f);
                 j.setAlpha(0.62f);
             }
