@@ -2,9 +2,11 @@ package com.huoyu.livesub;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.Manifest;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -47,14 +49,18 @@ public class MainActivity extends Activity {
 
     private static final int REQ_OVERLAY = 1001;
     private static final int REQ_NOTI = 1002;
+    private static final int REQ_WRITE = 1003;
 
     /** 自动检查更新的最小间隔（回到前台时若距上次超过该间隔才再查一次） */
     private static final long AUTO_CHECK_INTERVAL = 10 * 60 * 1000L;
 
     private WebView wv;
-    private TextView btnOverlay, btnReload, btnCfg, status;
+    private TextView btnOverlay, btnSave, btnReload, btnCfg, status;
     private SharedPreferences sp;
     private final Handler h = new Handler();
+
+    /** 等存储权限期间暂存的导出格式（API < 29 才需要） */
+    private int pendingSaveFmt = RecordExporter.FMT_TXT;
 
     /** 升级弹窗是否正在显示（避免重复弹栈） */
     private boolean updateDialogShowing = false;
@@ -96,6 +102,10 @@ public class MainActivity extends Activity {
         btnOverlay.setTextColor(0xFFFFFFFF);
         bar.addView(btnOverlay, lpBtn());
 
+        btnSave = mkBtn("存字幕", v -> showSavePicker());
+        btnSave.setTextColor(0xFFC9B6FF);
+        bar.addView(btnSave, lpBtn());
+
         btnReload = mkBtn("重载", v -> {
             if (wv != null) wv.reload();
         });
@@ -133,7 +143,7 @@ public class MainActivity extends Activity {
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         String ua = s.getUserAgentString();
-        s.setUserAgentString(ua + " HuoYuSub/1.3");
+        s.setUserAgentString(ua + " HuoYuSub/1.4");
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -420,6 +430,161 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ================= 保存本场字幕（翻译 + 原文） =================
+
+    /**
+     * 保存本场字幕。数据来自服务器留底（GET /api/record?kind=lines），
+     * 所以**从开播到现在的全部字幕**都能拿到，不受「什么时候打开 App」影响。
+     */
+    private void showSavePicker() {
+        int last = sp.getInt(Prefs.KEY_SAVE_FMT, RecordExporter.FMT_TXT);
+        if (last < 0 || last >= RecordExporter.FMT_LABELS.length) last = RecordExporter.FMT_TXT;
+        final int[] choice = {last};
+
+        new AlertDialog.Builder(this)
+                .setTitle("保存本场字幕")
+                .setSingleChoiceItems(RecordExporter.FMT_LABELS, last,
+                        (d, which) -> choice[0] = which)
+                .setPositiveButton("保存", (d, w) -> {
+                    sp.edit().putInt(Prefs.KEY_SAVE_FMT, choice[0]).apply();
+                    startSave(choice[0]);
+                })
+                .setNeutralButton("说明", (d, w) -> showSaveHelp())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showSaveHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("关于保存本场字幕")
+                .setMessage("· 保存的是服务器留底的本场全部字幕（从开播到现在），"
+                        + "什么时候打开 App 都不影响。\n"
+                        + "· 换台或重新开播后，记录会从头重置。\n"
+                        + "· 文件存到「下载/火羽字幕/」，可在文件管理器的「下载」里找到。\n"
+                        + "· 「中日对照」= 中文翻译 + 日文原文；SRT 可直接挂到播放器当外挂字幕。\n"
+                        + "· 字幕由服务端 ASR + 翻译推送，个别句子可能在译文到达前就已被记录，"
+                        + "若发现空行可稍后重存一次。")
+                .setPositiveButton("知道了", null)
+                .show();
+    }
+
+    /** API < 29 需要写外部存储权限；Q+ 走 MediaStore 不需要任何权限 */
+    private boolean storageReady() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void startSave(final int fmt) {
+        if (!storageReady()) {
+            pendingSaveFmt = fmt;
+            try {
+                requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_WRITE);
+            } catch (Throwable t) {
+                Toast.makeText(this, "无法申请存储权限，保存可能失败", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
+        final AlertDialog wait = new AlertDialog.Builder(this)
+                .setMessage("正在从服务器获取本场字幕…")
+                .setCancelable(false)
+                .create();
+        try {
+            wait.show();
+        } catch (Throwable ignored) {
+        }
+
+        final String b = base();
+        final String t = token();
+        RecordExporter.fetchAsync(b, t, new RecordExporter.Callback() {
+            @Override
+            public void onSuccess(final RecordExporter.Session s) {
+                if (s == null || s.lines.isEmpty()) {
+                    runOnUiThread(() -> {
+                        dismissQuietly(wait);
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("没有可保存的字幕")
+                                .setMessage("服务器当前没有本场字幕记录。\n\n"
+                                        + "可能原因：本场还没开播；刚换台 / 重新开播（记录已重置）；"
+                                        + "或当前这条线路不留底字幕 —— 可在设置里换回主服务器再试一次。")
+                                .setPositiveButton("好", null)
+                                .show();
+                    });
+                    return;
+                }
+
+                final RecordExporter.Export ex;
+                final String path;
+                try {
+                    ex = RecordExporter.build(fmt, s, shortAddr(b));
+                    path = FileStore.save(MainActivity.this, ex.name, ex.mime, ex.text);
+                } catch (final Throwable e) {
+                    runOnUiThread(() -> {
+                        dismissQuietly(wait);
+                        showSaveFailed(fmt, e);
+                    });
+                    return;
+                }
+
+                final String finalPath = path;
+                runOnUiThread(() -> {
+                    dismissQuietly(wait);
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("已保存 " + ex.count + " 句字幕")
+                            .setMessage("文件：" + finalPath
+                                    + "\n大小：" + fmtSize(ex.bytes())
+                                    + "\n\n可在「文件管理 → 下载 → " + FileStore.DIR_NAME
+                                    + "」里找到；SRT 可直接作为播放器外挂字幕。")
+                            .setPositiveButton("好", null)
+                            .setNeutralButton("再存一份", (d, w) -> showSavePicker())
+                            .show();
+                });
+            }
+
+            @Override
+            public void onFailure(final String msg) {
+                runOnUiThread(() -> {
+                    dismissQuietly(wait);
+                    showSaveFailed(fmt, new IllegalStateException(msg));
+                });
+            }
+        });
+    }
+
+    private void showSaveFailed(final int fmt, Throwable e) {
+        if (isFinishing()) return;
+        String m = e == null ? "未知错误" : (e.getMessage() == null
+                ? e.getClass().getSimpleName() : e.getMessage());
+        new AlertDialog.Builder(this)
+                .setTitle("保存失败")
+                .setMessage(m + "\n\n检查一下：服务器地址 / 密钥 k 是否正确、"
+                        + "手机网络能否访问该服务器、服务端是否支持 /api/record 接口。")
+                .setPositiveButton("好", null)
+                .setNeutralButton("重试", (d, w) -> startSave(fmt))
+                .show();
+    }
+
+    private void dismissQuietly(AlertDialog d) {
+        if (d == null) return;
+        try {
+            if (d.isShowing()) d.dismiss();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
+        super.onRequestPermissionsResult(req, perms, res);
+        if (req == REQ_WRITE) {
+            if (res != null && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) {
+                startSave(pendingSaveFmt);
+            } else {
+                Toast.makeText(this, "未授予存储权限，无法写入「下载」目录", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
     // ================= 版本检测 / 升级提醒 =================
 
     /**
@@ -604,7 +769,9 @@ public class MainActivity extends Activity {
                 + "123.60.104.22:6006 / 123.60.104.22:6007 / 8.133.231.186:6006）时，"
                 + "字幕服务器地址会自动跟着切过去，悬浮字幕立即重连。\n"
                 + "7. 版本检测：每次打开 App 会向当前服务器查询最新版本，"
-                + "有新版会弹窗提醒，点「立即升级」进入下载页。");
+                + "有新版会弹窗提醒，点「立即升级」进入下载页。\n"
+                + "8. 存字幕：点工具条「存字幕」可把本场全部字幕（中文翻译 + 日文原文）"
+                + "导出成 TXT / SRT / CSV / Markdown / JSON，文件存到「下载/火羽字幕」。");
         box.addView(tip);
 
         TextView verInfo = new TextView(this);
@@ -653,6 +820,18 @@ public class MainActivity extends Activity {
         blp.topMargin = dp(12);
         btnCheck.setLayoutParams(blp);
         box.addView(btnCheck);
+
+        Button btnDump = new Button(this);
+        btnDump.setText("保存本场字幕（翻译 + 原文）");
+        btnDump.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            showSavePicker();
+        });
+        LinearLayout.LayoutParams blp2 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp2.topMargin = dp(8);
+        btnDump.setLayoutParams(blp2);
+        box.addView(btnDump);
 
         settingsDlg.show();
     }

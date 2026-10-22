@@ -41,6 +41,8 @@ public final class Prefs {
     public static final String KEY_Y = "y";
     /** 网址切到白名单服务器时，是否自动把字幕服务器地址跟着切过去 */
     public static final String KEY_AUTO_SWITCH = "auto_switch";
+    /** 上次选择的字幕导出格式（RecordExporter.FMT_*） */
+    public static final String KEY_SAVE_FMT = "save_fmt";
 
     private Prefs() {
     }

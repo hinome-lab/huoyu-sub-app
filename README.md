@@ -10,7 +10,7 @@
 ![minSdk](https://img.shields.io/badge/minSdk-24-3DDC84?logo=android&logoColor=white)
 ![targetSdk](https://img.shields.io/badge/targetSdk-34-3DDC84?logo=android&logoColor=white)
 ![Java](https://img.shields.io/badge/Java-17-orange?logo=openjdk&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.3-blue)
+![Version](https://img.shields.io/badge/version-1.4-blue)
 ![Dependencies](https://img.shields.io/badge/third--party%20deps-0-brightgreen)
 
 </div>
@@ -57,6 +57,7 @@
 | ♻️ **断线自愈** | 推送流断开自动重连（指数退避），直播恢复后字幕自动接续 |
 | 🔀 **服务器自动切换** | 网页地址跳到白名单服务器时，字幕服务器地址自动跟着切过去并立即重连 |
 | ⬆️ **版本检测升级** | 每次打开 App 向当前服务器查询最新版本，有新版弹窗提醒，一键进入下载页 |
+| 💾 **保存本场字幕** | 一键导出本场**全部**「中文翻译 + 日文原文」到手机「下载」目录，7 种格式（TXT 中日对照 / 纯中文 / 带时间 / SRT / CSV / Markdown / JSON） |
 
 ---
 
@@ -101,6 +102,32 @@
 ---
 
 ## 进阶功能
+
+### 保存本场字幕（导出翻译 + 原文）
+
+点顶部工具条 **存字幕**（或 设置 → 保存本场字幕），选格式 → 保存：
+
+```
+GET {当前字幕服务器}/api/record?k=<口令>&kind=lines
+→ {"meta":{...}, "n_lines":759, "n_dms":..., "lines":[{id,ja,zh,tc,t,ts,el}, ...]}
+```
+
+拿到的是**服务器留底的本场全量字幕**（从开播到现在），所以什么时候打开 App 都不影响——不会只存到「打开 App 之后」的那几句。
+
+| 格式 | 内容 | 用途 |
+|---|---|---|
+| TXT · 中日对照 | `[已播 · 绝对时间] 中文` + 换行缩进日文 | 阅读 / 存档（默认） |
+| TXT · 纯中文 | 每行一句译文 | 快速通读、喂给翻译/总结工具 |
+| TXT · 中文 + 时间 | `[mm:ss.SSS] 中文` | 对轴、找时间点 |
+| SRT · 双语 | 标准 SRT，中日各一行 | 直接当播放器**外挂字幕** |
+| CSV · 表格 | `已播,时间,中文,日语`（带 UTF-8 BOM） | Excel / Numbers 直接打开不乱码 |
+| Markdown · 表格 | 四列表格 | 贴进笔记、GitHub |
+| JSON · 原始数据 | 服务端原样 `lines` 数组 | 二次处理 |
+
+- 文件位置：**下载 / 火羽字幕 / 火羽字幕-YYYY-MM-DD_HHmm.txt**（重名自动加序号，旧版系统）。
+- 权限：Android 10+ 走 MediaStore，**不需要任何存储权限**；Android 7.0–9 首次保存会申请一次「存储」权限。
+- 换台 / 重新开播后，服务端记录会重置，导出即新的一场。
+- 个别句子若在译文到达前就被记录，可能出现空行，稍后重存一次即可。
 
 ### 多服务器自动切换
 
@@ -188,10 +215,12 @@ huoyu-sub-app/
 ├─ app/src/main/
 │  ├─ AndroidManifest.xml
 │  ├─ java/com/huoyu/livesub/
-│  │  ├─ MainActivity.java      # WebView 壳、顶部工具条、设置、升级弹窗
+│  │  ├─ MainActivity.java      # WebView 壳、顶部工具条、设置、升级弹窗、存字幕入口
 │  │  ├─ OverlayService.java    # 悬浮字幕前台服务（核心）
 │  │  ├─ SseClient.java         # 手写 SSE 客户端（解析 + 重连）
 │  │  ├─ UpdateChecker.java     # 版本检测
+│  │  ├─ RecordExporter.java    # 本场字幕拉取（/api/record）+ 7 种格式生成
+│  │  ├─ FileStore.java         # 写入「下载/火羽字幕」（MediaStore / 旧版目录）
 │  │  └─ Prefs.java             # 配置项 + 服务器白名单 + URL 匹配工具
 │  └─ res/
 │     ├─ drawable/  mipmap-*/   # 应用图标、状态栏图标
@@ -210,6 +239,8 @@ huoyu-sub-app/
 | `OverlayService` | 前台服务（`foregroundServiceType=specialUse`）。创建 `TYPE_APPLICATION_OVERLAY` 悬浮窗、渲染中日对照字幕、拖动与边界限制、锁定穿透、通知栏快捷控制；接收 `ACTION_SWITCH` 在运行时热切换服务器 |
 | `SseClient` | 纯 `HttpURLConnection` 实现的 SSE 客户端。逐行解析 `data:` 负载，断线指数退避重连（1s → 12s 封顶） |
 | `UpdateChecker` | 请求 `/api/version`（回退 `/app/version`），解析版本信息；非 200 / 非 JSON / 无有效 `versionCode` 一律判定为不可用 |
+| `RecordExporter` | 请求 `/api/record?kind=lines` 拿本场全量字幕，按 `id` 去重排序，生成 7 种导出格式（TXT/SRT/CSV/MD/JSON），时间轴优先用 `el`（已播秒）、缺省回退 `t` |
+| `FileStore` | 落地到「下载/火羽字幕」：API 29+ 用 `MediaStore.Downloads` + `RELATIVE_PATH`（免权限），24–28 用公共下载目录 + 存储权限；重名自动加序号 |
 | `Prefs` | 常量与配置键、服务器白名单、`originOf()` / `matchServer()` URL 归一化与匹配 |
 
 ### 字幕推送协议（SSE）
@@ -278,6 +309,7 @@ gradle assembleRelease
 | `SYSTEM_ALERT_WINDOW` | 绘制悬浮字幕（核心能力） | 必需 |
 | `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_SPECIAL_USE` | 熄屏、切后台后字幕持续接收 | 必需 |
 | `POST_NOTIFICATIONS` | 通知栏快捷开关与状态显示 | Android 13+ 建议授予 |
+| `WRITE_EXTERNAL_STORAGE` | 保存本场字幕到「下载」目录 | **仅 Android 7.0–9 需要**（清单里限 `maxSdkVersion=28`；10+ 走 MediaStore，无需权限） |
 | `WAKE_LOCK` | 清单中已声明（预留；当前代码未显式持有 WakeLock） | 预留 |
 
 ---
@@ -286,6 +318,7 @@ gradle assembleRelease
 
 | 版本 | versionCode | 日期 | 内容 |
 |---|---|---|---|
+| **v1.4** | 5 | 2026-10-22 | 新增**存字幕**：一键导出本场全部字幕（中文翻译 + 日文原文）到「下载/火羽字幕」，支持 TXT 中日对照 / 纯中文 / 中文+时间 / SRT 双语 / CSV / Markdown / JSON 共 7 种格式；数据取服务端留底（`/api/record`），不受打开 App 时间影响 |
 | **v1.3** | 4 | 2026-10-16 | 修复：点「开启悬浮字幕」时把悬浮窗位置**重置回初始位置**（左侧 12dp、屏幕高度 60% 处）；修复**横竖屏切换后悬浮窗跑到屏幕外**——现按屏幕尺寸等比换算位置并强制约束在屏幕内 |
 | **v1.2** | 3 | 2026-10-16 | 启动时检测新版本（`/api/version`），非最新弹窗提醒升级；新增「立即检查更新」入口；设置页显示当前版本 |
 | **v1.1** | 2 | 2026-10-16 | 网址变化时自动切换字幕服务器（白名单匹配 + 同步 `k` + 无缝重连） |
